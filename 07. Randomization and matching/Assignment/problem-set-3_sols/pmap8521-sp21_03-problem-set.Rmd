@@ -1,0 +1,384 @@
+---
+title: "Problem set 3: RCTs, matching, and inverse probability weighting"
+author: "Answer key - PMAP 8521, Spring 2021"
+date: "March 1, 2021"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+  html_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r extra-options, include=FALSE}
+# We can use the kable() function from the knitr package to convert data frames
+# to Markdown tables and make pretty tables when knitting. Normally we'd have to
+# pipe all table output to kable manually (i.e. tidy(model_simple) %>% kable()),
+# but that gets tedious. To get around that, we can use this function to make it
+# so knitr automatically prints all data frames with kable() by itself
+#
+# You *absolutely do not* need to memorize this code. I actually copy and paste
+# it from past documents all the time :)
+#
+# Also, for whatever reason, when you load kableExtra, it does some weird stuff
+# behind the scenes with LaTeX tables and makes them really ugly, so 
+# kable_styling() + booktabs = TRUE fixes the formatting
+library(knitr)
+library(kableExtra)
+knit_print.data.frame <- function(x, ...) {
+  res <- paste(c('', '', kable_styling(kable(x, booktabs = TRUE))), collapse = '\n')
+  asis_output(res)
+}
+
+registerS3method("knit_print", "data.frame", knit_print.data.frame)
+registerS3method("knit_print", "grouped_df", knit_print.data.frame)
+
+# Set some default figure settings
+knitr::opts_chunk$set(fig.width = 6, fig.asp = 0.618, fig.align = "center", 
+                      fig.retina = 3, out.width = "75%")
+
+# Make all random things reproducible
+set.seed(1234)
+
+# Change default rounding and text output options
+options("digits" = 2, "width" = 150)
+
+# Turn off the messages that happen when you use group_by() %>% summarize()
+options(dplyr.summarise.inform = FALSE)
+```
+
+---
+
+# Program overview
+
+The metropolitan Atlanta area is interested in helping residents become more environmentally conscious, reduce their water consumption, and save money on their monthly water bills. To do this, Fulton, DeKalb, Gwinnett, Cobb, and Clayton counties have jointly initiated a new program that provides free rain barrels to families who request them. These barrels collect rain water, and the reclaimed water can be used for non-potable purposes (like watering lawns and gardens). Officials hope that families that use the barrels will rely more on rain water and will subsequently use fewer county water resources, thus saving both the families and the counties money.
+
+Being evaluation-minded, the counties hired an evaluator (you!) before rolling out their program. You convinced them to fund and run a randomized controlled trial (RCT) during 2018, and the counties rolled out the program city-wide in 2019. You have two datasets: `barrels_rct.csv` with data from the RCT, and `barrels_obs.csv` with observational data from self-selected participants.
+
+These datasets contain the following variables:
+
+- `id`: A unique ID number for each household
+- `water_bill`: The family's average monthly water bill, in dollars
+- `barrel`: An indicator variable showing if the family participated in the program
+- `barrel_num`: A 0/1 numeric version of `barrel`
+- `yard_size`: The size of the family's yard, in square feet
+- `home_garden`: An indicator variable showing if the family has a home garden
+- `home_garden_num`: A 0/1 numeric version of `home_garden`
+- `attitude_env`: The family's self-reported attitude toward the environment, on a scale of 1-10 (10 meaning highest regard for the environment)
+- `temperature`: The average outside temperature (these get wildly unrealistic for the Atlanta area; just go with it)
+
+# Your goal
+
+Your task in this problem set is to analyze these two datasets to find the causal effect (or average treatment effect (ATE)) of this hypothetical program. 
+
+***Follow these two examples from class as guides:***
+
+- [RCTs](https://evalf20.classes.andrewheiss.com/example/rcts/)
+- [Matching and IPW](https://evalf20.classes.andrewheiss.com/example/matching-ipw/)
+
+As a reference, Figure 1 shows the DAG for the program:
+
+![Rain barrel program DAG](images/barrel-dag-observational.png)
+
+---
+
+```{r load-libraries-data, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(broom)
+library(patchwork)
+library(MatchIt)
+library(modelsummary)
+
+barrels_rct <- read_csv("data/barrels_rct.csv") %>% 
+  # This makes it so "No barrel" is the reference category
+  mutate(barrel = fct_relevel(barrel, "No barrel"))
+
+barrels_obs <- read_csv("data/barrels_observational.csv") %>% 
+  # This makes it so "No barrel" is the reference category
+  mutate(barrel = fct_relevel(barrel, "No barrel"))
+```
+
+# 1. Finding causation from a randomized controlled trial
+
+## Modified DAG
+
+You remember from PMAP 8521 that when running an RCT, you can draw the DAG for the program like this (Figure 2). **Why?**
+
+![Rain barrel program DAG as an RCT](images/barrel-dag-rct.png)
+
+When you have control over the assignment of treatment status, you get to remove all the arrows pointing into the treatment node in the DAG, since nothing else causes the treatment—it is completely exogenous now. This instantly removes all backdoor confounding relationships between rain barrel use and water bill. Mathematically, we can write this effect using *do* language: $E(\text{Water bill}\ |\ do(\text{Rain barrel}))$
+
+## Check balance
+
+### Treatment balance
+
+There were `r nrow(barrels_rct)` participants in the rain barrel trial. We can check how well the trial was balanced:
+
+```{r check-treatment-balance}
+barrels_rct %>% 
+  count(barrel) %>% 
+  mutate(proportion = n / sum(n))
+```
+
+45% of participants were in the program, which is slightly lower than a perfect 50%. We can check if that's a statistically significant difference by using a proportion test in R (this wasn't in the class materials, but it's helpful to know). The null hypothesis in a proportion test is that the proportion of two groups is the same. If the p-value is less than 0.05, we can reject that null and claim that there's a significant difference in proportions; if the p-value is greater the 0.05, we don't have enough evidence to conclude that there's a difference.
+
+```{r check-treatment-prop-test}
+# table() finds a count of categories in barrels_rct$barrel; we then feed those
+# counts into prop.test() to run the actual test
+table(barrels_rct$barrel) %>% prop.test() %>% tidy()
+```
+
+We can also visualize the proportion of groups:
+
+```{r visualize-treatment-difference}
+# Getting confidence intervals from proportion tests is a little tricky, since
+# prop.test() only gives the results for one of the categories (the first number
+# that comes out of table()). Technically that's all we need when dealing with
+# two numbers---if the proportion of treatment is 75%, the proportion of control
+# has to be 25%. But when plotting, it can be helpful to include both groups.
+# Here we make two data frames that each have one row and then combine them into
+# one. The only difference between the two is that we use rev() on the second
+# one to reverse the output of table() so that it runs the test based on the
+# control group.
+proportion_control <- table(barrels_rct$barrel) %>% 
+  prop.test() %>% 
+  tidy() %>% 
+  mutate(group = "No barrel")
+
+proportion_treatment <- rev(table(barrels_rct$barrel)) %>% 
+  prop.test() %>% 
+  tidy() %>% 
+  mutate(group = "Barrel")
+
+all_proportions <- bind_rows(proportion_control, proportion_treatment) %>% 
+  mutate(group = fct_inorder(group))
+
+ggplot(all_proportions, aes(x = group, y = estimate, color = group)) +
+  geom_hline(yintercept = 0.5, color = "darkorange", alpha = 0.5, size = 1) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high)) +
+  guides(color = FALSE) +
+  coord_cartesian(ylim = c(0.35, 0.65)) +
+  labs(x = NULL, y = "Proportion")
+```
+
+Based on this graph and the results from `prop.test()`, there is a statistically significant difference between the two groups (p = 0.02), so there are definitely more people in the treatment group than expected. That doesn't necessarily destroy the results, but it's something to keep in mind when reporting the results.
+
+### Pre-treatment characteristic balance
+
+Participants' pre-treatment characteristics appear fairly well balanced. It seems that people in the control group are more likely to have a garden, have a larger yard, and have higher regard for the environment, but these differences aren't statistically significant.
+
+```{r check-pretreatment-balance}
+barrels_rct %>% 
+  group_by(barrel) %>% 
+  summarize(prop_garden = mean(home_garden_num),
+            avg_yard_size = mean(yard_size),
+            avg_env = mean(attitude_env),
+            avg_temp = mean(temperature))
+```
+
+This is apparent in the following plots. There's no statistically significant difference between home garden use between the two groups (p = 0.1):
+
+```{r garden-balance}
+t.test(home_garden_num ~ barrel, data = barrels_rct) %>% tidy()
+```
+
+```{r plot-garden-balance, fig.width=7, fig.asp=0.618/1.5, out.width="100%"}
+plot_diff_garden <- ggplot(barrels_rct, aes(x = barrel, y = home_garden_num, color = barrel)) +
+  stat_summary(geom = "pointrange", fun.data = "mean_se", fun.args = list(mult = 1.96)) +
+  guides(color = FALSE) +
+  labs(x = NULL, y = "Proportion with a garden")
+
+plot_prop_garden <- ggplot(barrels_rct, aes(x = barrel, fill = home_garden)) +
+  geom_bar(position = "fill") +
+  labs(x = NULL, y = "Proportion", fill = NULL) +
+  scale_fill_manual(values = c("darkblue", "darkred"))
+
+# Show the plots side-by-side
+plot_diff_garden + plot_prop_garden
+```
+
+There's also no difference in average yard size (p = 0.217):
+
+```{r yard-diff-test}
+t.test(yard_size ~ barrel, data = barrels_rct) %>% tidy()
+```
+
+```{r plot-yard-diff, fig.width=9, fig.asp=0.618/1.5, out.width="100%"}
+plot_diff_yard <- ggplot(barrels_rct, aes(x = barrel, y = yard_size, color = barrel)) +
+  stat_summary(geom = "pointrange", fun.data = "mean_se", fun.args = list(mult = 1.96)) +
+  guides(color = FALSE) +
+  labs(x = NULL, y = "Yard size")
+
+plot_hist_yard <- ggplot(barrels_rct, aes(x = yard_size, fill = barrel)) +
+  geom_histogram(binwidth = 1000, color = "white") +
+  guides(fill = FALSE) +
+  labs(x = "Yard size", y = "Count") +
+  facet_wrap(vars(barrel), ncol = 1)
+
+plot_diff_yard + plot_hist_yard
+```
+
+There's also no difference in attitudes towards the environment (p = 0.584):
+
+```{r env-diff-test}
+t.test(attitude_env ~ barrel, data = barrels_rct) %>% tidy()
+```
+
+```{r plot-env-diff, fig.width=9, fig.asp=0.618/1.5, out.width="100%"}
+plot_diff_env <- ggplot(barrels_rct, aes(x = barrel, y = attitude_env, color = barrel)) +
+  stat_summary(geom = "pointrange", fun.data = "mean_se", fun.args = list(mult = 1.96)) +
+  guides(color = FALSE) +
+  labs(x = NULL, y = "Attitude toward the environment")
+
+plot_hist_env <- ggplot(barrels_rct, aes(x = attitude_env, fill = barrel)) +
+  geom_histogram(binwidth = 1, color = "white") +
+  guides(fill = FALSE) +
+  labs(x = "Attitude toward the environment", y = "Count") +
+  facet_wrap(vars(barrel), ncol = 1)
+
+plot_diff_env + plot_hist_env
+```
+
+And finally, there's no difference in average temperature (p = 0.702):
+
+```{r temp-diff-test}
+t.test(temperature ~ barrel, data = barrels_rct) %>% tidy()
+```
+
+```{r plot-temp-diff, fig.width=9, fig.asp=0.618/1.5, out.width="100%"}
+plot_diff_temp <- ggplot(barrels_rct, aes(x = barrel, y = temperature, color = barrel)) +
+  stat_summary(geom = "pointrange", fun.data = "mean_se", fun.args = list(mult = 1.96)) +
+  guides(color = FALSE) +
+  labs(x = NULL, y = "Temperature")
+
+plot_hist_temp <- ggplot(barrels_rct, aes(x = temperature, fill = barrel)) +
+  geom_histogram(binwidth = 1, color = "white") +
+  guides(fill = FALSE) +
+  labs(x = "temperature", y = "Count") +
+  facet_wrap(vars(barrel), ncol = 1)
+
+plot_diff_temp + plot_hist_temp
+```
+
+
+## Estimate difference
+
+We calculate the causal effect of the program by finding the difference in the average water bill in the treatment and control groups. We do this with a simple regression model:
+
+```{r rct-effect}
+model_rct <- lm(water_bill ~ barrel, data = barrels_rct)
+tidy(model_rct)
+```
+
+The rain barrel program *causes* water bills to be $40 lower, on average, and the finding is statistically significant (p < 0.001). I would find this result fairly credible (even though treatment wasn't perfectly balanced).
+
+Here's what that effect looks like:
+
+```{r plot-rct-effect}
+ggplot(barrels_rct, aes(x = barrel, y = water_bill, color = barrel)) +
+  stat_summary(geom = "pointrange", fun.data = "mean_se", fun.args = list(mult = 1.96)) +
+  guides(color = FALSE) +
+  labs(x = NULL, y = "Monthly water bill")
+```
+
+\newpage
+
+# 2. Finding causation from observational data
+
+We can use the observational rain barrel data to try to find a similar causal effect. There are more rows in this data (n = `r nrow(barrels_obs)`), but participants self-selected into the program, which means we have to deal with counfounders and backdoors.
+
+## Naive difference in means
+
+If we calculate a naive difference in means, we find that those who used barrels save \$30 on their water bill. This is wrong, though, because of self-selection.
+
+```{r naive-diffs-manual}
+barrels_obs %>% 
+  group_by(barrel) %>% 
+  summarize(number = n(),
+            avg_bill = mean(water_bill))
+```
+
+```{r naive-diffs-regression}
+model_naive <- lm(water_bill ~ barrel, data = barrels_obs)
+tidy(model_naive)
+```
+
+\newpage
+
+## Adjustment with Mahalanobis nearest-neighbor matching
+
+Because we know that home garden use, yard size, attitudes toward the environment, and temperatures cause rain barrel use, we'll try to find observations with similar values of these confounders who both used and didn't use rain barrels, thus creating well-matched pseudo treatment and control groups. We do this first with one-to-many Mahalanobis nearest-neighbor matching.
+
+```{r match-things}
+matched <- matchit(barrel_num ~ yard_size + attitude_env + home_garden_num + temperature,
+                   data = barrels_obs, method = "nearest", distance = "mahalanobis",
+                   replace = TRUE)
+summary(matched)
+```
+
+All 505 barrel users were paired with 301 non-barrel users, and we discard 435 non-barrel users that don't match well. We use this matched data in a new regression model:
+
+```{r use-matched-data}
+barrels_matched <- match.data(matched)
+
+model_matched <- lm(water_bill ~ barrel, data = barrels_matched)
+tidy(model_matched)
+```
+
+After matching, the causal effect of the rain barrel program is now \$35, which is larger than the naive ATE (and closer to the "true" RCT ATE of \$40).
+
+We can use the weights from `matchit()` to fix the imbalance in weighting that happens from reusing matched observations, thus increasing accuracy:
+
+```{r use-matched-data-weights}
+model_matched_weighted <- lm(water_bill ~ barrel, 
+                             data = barrels_matched, weights = weights)
+tidy(model_matched_weighted)
+```
+
+Now the ATE is \$39, which is surprisingly close to the RCT ATE!
+
+\newpage
+
+## Adjustment with inverse probability weighting
+
+We also use inverse probability weighting to adjust for the confounding backdoors. We use logistic regression to model the choice to use a barrel based on yard size, attitudes toward the environment, use of a home garden, and tempurature, and then use the predicted probabilities from this model as weights to calculate the ATE of the barrel program on water bills.
+
+```{r run-ipw}
+# Generate propensity scores
+wants_barrel_model <- glm(barrel ~ yard_size + attitude_env + home_garden + temperature,
+                          data = barrels_obs, family = binomial(link = "logit"))
+
+barrel_propensities <- augment_columns(wants_barrel_model, barrels_obs, 
+                                       type.predict = "response") %>% 
+  rename(p_barrel = .fitted)
+
+# Calculate ATE weights
+barrels_ipw <- barrel_propensities %>% 
+  mutate(ipw = (barrel_num / p_barrel) + ((1 - barrel_num) / (1 - p_barrel))) %>% 
+  # Truncate high weights at 10
+  mutate(ipw = ifelse(ipw > 10, 10, ipw))
+
+model_ipw <- lm(water_bill ~ barrel, 
+                data = barrels_ipw, weights = ipw)
+tidy(model_ipw)
+```
+
+After using inverse probability weighting, the observational ATE for the rain barrel program is \$38.70, which is again much closer to \$40 than the naive estimate.
+
+\newpage
+
+# 3. Comparing results
+
+Here are all the ATEs we found:
+
+```{r model-summary}
+modelsummary(list("RCT" = model_rct, "Naive" = model_naive,
+                  "Matching, unweighted" = model_matched,
+                  "Matching, weighted" = model_matched_weighted,
+                  "IPW, truncated" = model_ipw)) %>% 
+  kableExtra::row_spec(3, bold = TRUE, color = "white", background = "orange")
+```
+
+If this were a real program with a real RCT, I'd believe the RCT ATE the most, since it doesn't suffer from selection bias and unobserved confounding. If I could only rely on observational data, and I didn't know what the actual true value is, I'd use both the weighted Mahalanobis and IPW models, since they each take care of DAG backdoors. Each of these ATEs is statistically significant and fairly substantive—saving ≈\$40 a month on my water bill would be great! Given these findings, it might be worth rolling this program out statewide.
