@@ -1,0 +1,284 @@
+---
+title: "Matching and Inverse Probability Weighting"
+author: "Shelmith Kariuki"
+date: "5/7/2021"
+output: github_document
+always_allow_html: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+```{r, include=FALSE}
+#### Load the packages that are required.
+
+###  Create a vector of packages to be installed
+pkgs <- c("tidyverse", "ggdag", "dagitty","broom", "MatchIt", "modelsummary")
+
+## tidyverse: Data manipulation
+## ggdag: Making DAGS 
+## dagitty:  Do DAG logic with R
+## broom: Convert models to data frames
+## MatchIt: Match things
+## modelsummary: Make all random draws reproducible
+
+###  Check if there are packages you want to load, that are not already installed. 
+miss_pkgs <- pkgs[!pkgs %in% installed.packages()[,1]] 
+
+###  Installing the missing packages
+if(length(miss_pkgs)>0){
+  install.packages(miss_pkgs)
+}
+
+###  Loading all the packages
+invisible(lapply(pkgs,library,character.only=TRUE))
+library(DDSQLtools)
+
+###  Remove the objects that are no longer required
+rm(miss_pkgs)
+rm(pkgs)
+
+set.seed(1234)
+```
+
+### 1. Program background
+
+Researchers are interested in whether using mosquito nets decreases an individual's risk of contracting malaria. They have collected data from 1, 752 households in an unnamed country and have variables related to environmental factors, individual health, and household characteristics.
+
+The data is **not experimental**—researchers have no control over who uses mosquito nets, and individual households make their own choices over whether to apply for free nets or buy their own nets, as well as whether they use the nets if they have them.
+
+The CSV file contains the following columns:
+
++ Malaria risk (malaria_risk): The likelihood that someone in the household will be infected
+with malaria. Measured on a scale of 0–100, with higher values indicating higher risk.
+
++ Mosquito net (net and net_num): A binary variable indicating if the household used mosquito nets.
+
++ Eligible for program (eligible): A binary variable indicating if the household is eligible for the free net program.
+
++ Income (income): The household’s monthly income, in US dollars.
+
++ Nighttime temperatures (temperature): The average temperature at night, in Celsius.
+
++ Health (health): Self-reported healthiness in the household. Measured on a scale of 0–100, with higher values indicating better health.
+
++ Number in household (household): Number of people living in the household.
+
++ Insecticide resistance (resistance): Some strains of mosquitoes are more resistant to insecticide and thus pose a higher risk of infecting people with malaria. This is measured on a scale of 0–100, with higher values indicating higher resistance.
+
+**Our goal is to estimate the _causal_ effect of bed net usage on malaria risk using only observational data**. This was not an RCT, so it might seem a little sketchy to make claims of causality. But if we can draw a correct DAG and adjust for the correct nodes, we can isolate the net → malaria relationship and talk about causality.
+
+
+```{r}
+nets <- read_csv("data/mosquito_nets.csv")
+```
+
+
+### 2. DAG and adjustment sets
+
+Before running any models, we need to find what we need to adjust for.
+
+```{r}
+mosquito_dag <- dagify(
+  malaria_risk ~ net + income + health + temperature + resistance,
+  net ~ income + health + temperature + eligible + household,
+  eligible ~ income + household,
+  health ~ income,
+  exposure = "net",
+  outcome = "malaria_risk",
+  coords = list(x = c(malaria_risk = 7, net = 3, income = 4, health = 5,
+                      temperature = 6, resistance = 8.5, eligible = 2, household = 1),
+                y = c(malaria_risk = 2, net = 2, income = 3, health = 1,
+                      temperature = 3, resistance = 2, eligible = 3, household = 2)),
+  labels = c(malaria_risk = "Risk of malaria", net = "Mosquito net", income = "Income",
+             health = "Health", temperature = "Nighttime temperatures",
+             resistance = "Insecticide resistance",
+             eligible = "Eligible for program", household = "Number in household")
+)
+
+ggdag_status(mosquito_dag, use_labels = "label", text = FALSE) +
+  guides(fill = FALSE, color = FALSE) +  # Disable the legend
+  theme_dag()
+```
+
+Following the logic of do-calculus, we can find all the nodes that confound the relationship between net usage and malaria risk, since those nodes open up backdoor paths and distort the causal effect we care about. We can either do this graphically by looking for any node that points to both net and malaria risk, or we can use R:
+
+```{r}
+adjustmentSets(mosquito_dag)
+```
+From the list above, adjusting for health, income, and temperature is enough to close all backdoors and identify the relationship between net use and malaria risk.
+
+### 3. Naive correlation-isn’t-causation estimate
+
+We can start by calculating the difference in average malaria risk for those who did / didn't use mosquito nets.
+This is not the actual causal effect but the “correlation is not causation” effect which doesn’t account for any of the backdoors in the DAG.
+
+We can do this with a table, or with a linear regression model.
+
+```{r}
+tab <- nets %>% 
+        group_by(net) %>% 
+        summarize(number = n(),
+                  avg = mean(malaria_risk))
+tab
+abs(tab[1,3] - tab[2,3])
+```
+
+```{r}
+model_wrong <- lm(malaria_risk ~ net, data = nets)
+tidy(model_wrong)
+```
+According to this estimate, usage of a mosquito net decreases the risk of getting malaria by 
+16 points. We can’t legally talk about this as a causal effect though—there are confounding variables to deal with.
+
+### 4. Matching
+
+We can use matching techniques to pair up similar observations and make the unconfoundedness assumption—that if we see two observations that are pretty much identical, and one used a net and one didn’t, the choice to use a net was random.
+
+Because we know from the DAG that income, nighttime temperatures, and health help cause both net use and malaria risk (and confound that relationship!), we’ll try to find observations with similar values of income, temperatures, and health that both used and didn’t use nets.
+
+We can use the matchit() function from the [MatchIt](https://kosukeimai.github.io/MatchIt/index.html) R package to match points based on Mahalanobis distance.
+
+We can include the `replace = TRUE` option to make it so that points that have been matched already can be matched again (that is, we’re not forcing a one-to-one matching; we have one-to-many matching instead).
+
+#### 4.1 Preprocess
+
+```{r}
+matched_data <- matchit(net ~ income + temperature + health,
+                        data = nets,
+                        method = "nearest",
+                        distance = "mahalanobis",
+                        replace = TRUE)
+summary(matched_data)
+```
+
+Here we can see that all 681 of the net users were paired with similar-looking non-users (439 of them). 632 people weren’t matched and will get discarded.
+
+To which treated rows got matched to which control rows, run the code below:
+
+```{r}
+head(matched_data$match.matrix)
+```
+
+We can create a new data frame of those matches with `match.data()`. This dataset should have (1752 - 632 = 1120) observations.
+
+```{r}
+matched_data_for_real <- match.data(matched_data)
+
+```
+
+#### 4.2 Check whether the balance was effective.
+
+```{r}
+t.test(income ~ net, data = matched_data_for_real)
+t.test(temperature ~ net, data = matched_data_for_real)
+t.test(health ~ net, data = matched_data_for_real)
+```
+
+#### 4.3 Estimation
+
+Now that the data has been matched, it should work better for modeling. Also, because we used income, temperatures, and health in the matching process, we’ve adjusted for those DAG nodes and have closed those backdoors, so our model can be pretty simple here:
+
+```{r}
+model_matched <- lm(malaria_risk ~ net,
+                    data = matched_data_for_real)
+tidy(model_matched)
+```
+
+The 12.88 point decrease here is better than the naive estimate, but it’s not the true 10 point causal effect (that the trainer built in to the data). Perhaps that’s because the matches aren’t great, or maybe we threw away too much data. There are a host of diagnostics you can look at to see how well things are matched (check the documentation for MatchIt for examples.)
+
+Actually, the most likely culprit for the incorrect estimate is that there’s some imbalance in the data. Because we set `replace = TRUE`, we did not do 1:1 matching—untreated observations were paired with more than one treated observation. As a result, the multiply-matched observations are getting overcounted and have too much importance in the model. Fortunately, matchit() provides us with a column called **weights** that allows us to scale down the overmatched observations when running the model. Importantly, these weights have nothing to do with causal inference or backdoors or inverse probability weighting—their only purpose is to help scale down the imbalance arising from overmatching. If you use `replace = FALSE` and enforce 1:1 matching, the whole weights column will just be 1.
+
+```{r}
+model_matched_wts <- lm(malaria_risk ~ net,
+                        data = matched_data_for_real,
+                        weights = weights)
+tidy(model_matched_wts)
+```
+After weighting to account for under- and over-matching, we find a -10.49 point causal effect. That’s much better than any of the other estimates we’ve tried so far! The reason it’s accurate is because we’ve closed the confounding backdoors and isolated the arrow between net use and malaria risk.
+
+
+
+### 5. Inverse Probability Weighting
+
+One potential downside to matching is that you generally have to throw away a sizable chunk of your data—anything that’s unmatched doesn’t get included in the final matched data.
+
+An alternative approach to matching is to assign every observation some probability of receiving treatment, and then weight each observation by its inverse probability—observations that are predicted to get treatment and then don’t, or observations that are predicted to not get treatment and then do will receive more weight than the observations that get/don’t get treatment as predicted.
+
+Generating these inverse probability weights requires a two step process: (1) we first generate propensity scores, or the probability of receiving treatment, and then (2) we use a special formula to convert those propensity scores into weights. Once we have inverse probability weights weights, we can incorporate them into our regression model.
+
+#### 5.1 Generate propensity scores
+
+```{r}
+model_net <- glm(net ~ income + temperature + health,
+                   data = nets,
+                   family = binomial(link = "logit"))
+
+
+```
+
+We can then plug in the income, temperatures, and health for every row in our dataset and generate a predicted probability using this model:
+
+```{r}
+# augment_columns() handles the plugging in of values. You need to feed it the
+# name of the model and the name of the dataset you want to add the predictions
+# to. The type.predict = "response" argument makes it so the predictions are in
+# the 0-1 scale. If you don't include that, you'll get predictions in an
+# uninterpretable log odds scale.
+net_probabilities <- augment_columns(model_net,
+                                     nets,
+                                     type.predict = "response") %>%
+  # The predictions are in a column named ".fitted", so we rename it here
+  rename(propensity = .fitted)
+
+
+# Look at the first few rows of a few columns
+net_probabilities %>%
+  select(id, net, income, temperature, health, propensity) %>%
+  head()
+```
+
+Next we need to convert those propensity scores into inverse probability weights, which makes weird observations more important (i.e. people who had a high probability of using a net but didn’t, and vice versa). To do this, we follow this equation:
+$$\frac{Treatment}{Propensity} - \frac{1-Treatment}{1-Propensity}$$
+This equation will create weights that provide the average treatment effect (ATE)
+
+```{r}
+net_ipw <- net_probabilities %>%
+  mutate(ipw = (net_num / propensity) + ((1 - net_num) / (1 - propensity)))
+
+# Look at the first few rows of a few columns
+net_ipw %>%
+  select(id, net, income, temperature, health, propensity, ipw) %>%
+  head()
+```
+
+These first few rows have fairly low weights—those with low probabilities of using nets didn’t, while those with high probabilities did. But look at person 4! They only had a 26% chance of using a net and they did! That’s weird! They therefore have a higher inverse probability weight
+
+#### 5.2 Estimation
+
+Now that we’ve generated inverse probability weights based on our confounders, we can run a model to find the causal effect of mosquito net usage on malaria risk. Again, we don’t need to include income, temperatures, or health in the model since we already used them when we created the propensity scores and weights:
+
+
+```{r}
+model_ipw <- lm(malaria_risk ~ net,data = net_ipw,weights = ipw)
+
+tidy(model_ipw)
+```
+
+
+### 6. Results from all the models
+
+```{r}
+modelsummary(list("Naive" = model_wrong,
+                  "Matched" = model_matched, "Matched + weights" = model_matched_wts,
+                  "IPW" = model_ipw))
+```
+
+Because this is fake simulated data where the trainer built in a 10 point effect, we can see which of these models gets the closest: here, the non-truncated IPW model wins.
+
+Both matching and IPW work well for closing backdoors and adjusting for confounders.  In real life, you won’t know the true value, so try multiple ways.
