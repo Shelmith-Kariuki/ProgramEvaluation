@@ -1,8 +1,7 @@
 ---
 title: "Randomization and Matching"
-author: "Shelmith Kariuki"
-date: "5/6/2021"
-output: html_document
+output: github_document
+always_allow_html: true
 ---
 
 
@@ -44,13 +43,14 @@ rm(pkgs)
 set.seed(1234)
 ```
 
-```{r}
-village_randomized <- read_csv("data/village_randomized.csv")
-```
 
 ### Program details
 
 In this hypothetical situation, an NGO is planning on launching a training program designed to boost incomes. Based on their experiences in running pilot programs in other countries, they’ve found that older, richer men tend to self-select into the training program. The NGO’s evaluation consultant (you!) drew this causal model explaining the effect of the program on participant incomes, given the confounding caused by age, sex, and prior income:
+
+```{r}
+village_randomized <- read_csv("data/village_randomized.csv")
+```
 
 
 ```{r}

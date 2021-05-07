@@ -1,7 +1,5 @@
 Matching and Inverse Probability Weighting
 ================
-Shelmith Kariuki
-5/7/2021
 
 ### 1. Program background
 
@@ -17,30 +15,30 @@ whether they use the nets if they have them.
 
 The CSV file contains the following columns:
 
--   Malaria risk (malaria\_risk): The likelihood that someone in the
+-   Malaria risk (`malaria_risk`): The likelihood that someone in the
     household will be infected with malaria. Measured on a scale of
     0–100, with higher values indicating higher risk.
 
--   Mosquito net (net and net\_num): A binary variable indicating if the
-    household used mosquito nets.
+-   Mosquito net (`net` and `net_num`): A binary variable indicating if
+    the household used mosquito nets.
 
--   Eligible for program (eligible): A binary variable indicating if the
-    household is eligible for the free net program.
+-   Eligible for program (`eligible`): A binary variable indicating if
+    the household is eligible for the free net program.
 
--   Income (income): The household’s monthly income, in US dollars.
+-   Income (`income`): The household’s monthly income, in US dollars.
 
--   Nighttime temperatures (temperature): The average temperature at
+-   Nighttime temperatures (`temperature`): The average temperature at
     night, in Celsius.
 
--   Health (health): Self-reported healthiness in the household.
+-   Health (`health`): Self-reported healthiness in the household.
     Measured on a scale of 0–100, with higher values indicating better
     health.
 
--   Number in household (household): Number of people living in the
+-   Number in household (`household`): Number of people living in the
     household.
 
--   Insecticide resistance (resistance): Some strains of mosquitoes are
-    more resistant to insecticide and thus pose a higher risk of
+-   Insecticide resistance (`resistance`): Some strains of mosquitoes
+    are more resistant to insecticide and thus pose a higher risk of
     infecting people with malaria. This is measured on a scale of 0–100,
     with higher values indicating higher resistance.
 
