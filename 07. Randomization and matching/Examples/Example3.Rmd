@@ -1,0 +1,169 @@
+---
+title: "Propensity Score Weighting"
+output: github_document
+always_allow_html: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+Propensity score weighting is one of the techniques used in controlling
+for selection biases in nonexperimental studies. Propensity scores can
+be used as weights to account for selection assignment differences
+between treatment and comparison groups. One of the advantages of this
+approach is that all the individuals in the study can be used for the
+outcomes evaluation.
+
+In order to conduct an analysis involving propensity scores, the authors
+follow a very specific set of steps that include:
+
+1.  Outcome analysis without the use of propensity scores
+
+2.  Balance analysis prior to the implementation of propensity scores
+
+3.  Propensity score estimation
+
+4.  Weight estimation using propensity scores
+
+5.  Balance analysis after implementing propensity scores
+
+6.  Outcomes analysis using propensity scores in a weighted regression
+
+We will use the "lalonde" datafile that is part of the {MatchIt} pckage. 
+The dataset was developed by Lalonde (1986) to demonstrate the impact of a retraining program (National Supported Work Demonstration). The data file included in {MatchIt} contains 614 observations, with 185 in the treatment group and 429 in the control group. The outcome variable is re78, which is the income for individuals in both groups during 1978.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+```{r, include=FALSE}
+#### Load the packages that are required.
+
+###  Create a vector of packages to be installed
+pkgs <- c("tidyverse","MatchIt", "broom", "weights")
+
+## tidyverse: Data manipulation
+## MatchIt: Match things
+
+###  Check if there are packages you want to load, that are not already installed. 
+miss_pkgs <- pkgs[!pkgs %in% installed.packages()[,1]] 
+
+###  Installing the missing packages
+if(length(miss_pkgs)>0){
+  install.packages(miss_pkgs)
+}
+
+###  Loading all the packages
+invisible(lapply(pkgs,library,character.only=TRUE))
+library(DDSQLtools)
+
+###  Remove the objects that are no longer required
+rm(miss_pkgs)
+rm(pkgs)
+
+set.seed(1234)
+```
+
+#### 0. Read in the data
+
+```{r}
+attach(lalonde)
+lalonde <- lalonde %>% 
+  mutate(black = ifelse(race == "black", 1, 0),
+         hispan = ifelse(race == "hispan", 1, 0))
+```
+
+#### 1.  Outcome analysis without the use of propensity scores
+
+In this step, we run an outcome analysis without the use of propensity scores. 
+
+This analysis is helpful to gauge what might have been the result of the outcome analysis had we not used propensity scores to control for potential selection biases associated with group assignment. 
+
+```{r}
+model0 <- lm(re78 ~ treat + black + hispan + married, data = lalonde)
+summary(model0)
+```
+
+From the results shown above, there is no treatment effect (since the variable treat is not statistically significant), but the `black` and `married` covariates are significant at p < 0.05
+
+#### 2.  Balance analysis prior to the implementation of propensity scores
+
+This step is intended to assess the degree of bias between the groups before the propensity score is incorporated in the analysis. 
+
+Typical analyses include statistical comparisons between the covariate (as DV) and the treatment variable (as IV).
+
+```{r}
+yvars <- names(lalonde)[!names(lalonde) %in% c("treat", "race")]
+xvar <- "treat"
+
+for(i in 1: length(yvars)){
+form <- as.formula(paste(yvars[i], xvar, sep = "~"))
+print(form)
+print(t.test(form, data = lalonde))
+  
+}
+```
+
+The results show us that there is imbalance in treatment assignment in all the variables expect `married`.
+
+#### 3.  Propensity score estimation
+
+The next step is the estimation of the propensity scores that will be used as weights in the analysis. 
+
+Logistic regression is used to determine the probability of membership in the treatment or control group, given the specific set of selection variables included. 
+```{r}
+## Fit the logistic regression model
+ps <- glm(treat ~ age + educ + nodegree + re74 + re75, 
+          family = binomial(), data = lalonde)
+
+## Extract the predicted values (propensity scores) and attach them to the data
+lalonde2 <- augment_columns(ps,lalonde,type.predict = "response") %>%
+            rename(propensity = .fitted)
+```
+
+#### 4.  Weight estimation using propensity scores
+
+Calculate the inverse probability weights by using the formula:
+
+$$\frac{Treatment}{Propensity} + \frac{1-Treatment}{1-Propensity}$$
+
+This gives more weight to the misclassified observations and less weight to the classifications that are classified correctly.
+
+```{r}
+lalonde2 <- lalonde2 %>% 
+  mutate(ipw = (treat / propensity) + ((1 - treat)/(1 - propensity)))
+```
+
+#### 5.  Balance analysis after implementing propensity scores
+The ultimate purpose of using propensity scores is to balance the treatment/comparison groups on the observed covariates.
+
+To assess the success of the propensity scores as weights in a weighted regression for removing selection bias, a new set of tests to check the balance should be performed.
+
+However, now weighted linear regressions are performed using computed propensity scores as weights. 
+
+```{r}
+yvars <- names(lalonde)[!names(lalonde) %in% c("treat", "race")]
+xvar <- "treat"
+
+for(i in 1: length(yvars)){
+form <- as.formula(paste(yvars[i], xvar, sep = "~"))
+print(form)
+print(summary(lm(form, weight = (ipw),  data = lalonde2)))
+  
+}
+```
+
+#### 6.  Outcomes analysis using propensity scores in a weighted regression
+
+The final step in the analysis is to run the outcomes model using the propensity scores as weights. In this example the outcomes model includes
+re78 as the outcome variable and treat, black and married as independent variables. 
+
+```{r}
+model3 <- lm(re78 ~ treat + black + hispan + married, data = lalonde2,
+             weights = (ipw))
+summary(model3)
+```
+The results above show that the effect of the treatment was statistically significant after the groups are balanced using propensity scores. 

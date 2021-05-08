@@ -378,11 +378,7 @@ We can then plug in the income, temperatures, and health for every row
 in our dataset and generate a predicted probability using this model:
 
 ``` r
-# augment_columns() handles the plugging in of values. You need to feed it the
-# name of the model and the name of the dataset you want to add the predictions
-# to. The type.predict = "response" argument makes it so the predictions are in
-# the 0-1 scale. If you don't include that, you'll get predictions in an
-# uninterpretable log odds scale.
+# augment_columns() handles the plugging in of values. You need to feed it the name of the model and the name of the dataset you want to add the predictions to. The type.predict = "response" argument makes it so the predictions are in the 0-1 scale. If you don't include that, you'll get predictions in an uninterpretable log odds scale.
 net_probabilities <- augment_columns(model_net,
                                      nets,
                                      type.predict = "response") %>%
@@ -410,7 +406,7 @@ Next we need to convert those propensity scores into inverse probability
 weights, which makes weird observations more important (i.e. people who
 had a high probability of using a net but didn’t, and vice versa). To do
 this, we follow this equation:
-$$\\frac{Treatment}{Propensity} - \\frac{1-Treatment}{1-Propensity}$$
+$$\\frac{Treatment}{Propensity} + \\frac{1-Treatment}{1-Propensity}$$
 This equation will create weights that provide the average treatment
 effect (ATE)
 
